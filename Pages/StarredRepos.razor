@@ -2,6 +2,9 @@
 @using GithubStarAITool.Models
 @using GithubStarAITool.Services
 @inject IGitHubService GitHubService
+@inject IEmbeddingService EmbeddingService
+@inject IIndexedDBService IndexedDBService
+@inject IVectorSimilarityService VectorSimilarityService
 
 <div class="container mt-4">
     <h3 class="text-center mb-4">GitHub Starred Repositories</h3>
@@ -10,7 +13,7 @@
         <div class="input-group">
             <input type="text" class="form-control" @bind="username" @bind:event="oninput" 
                    placeholder="Enter GitHub username" @onkeyup="@(async (e) => { if (e.Key == "Enter") await SearchRepos(); })"/>
-            <button class="btn btn-primary" @onclick="SearchRepos" disabled="@isLoading">
+            <button class="btn btn-secondary" @onclick="LoadAllRepos" disabled="@isLoading">
                 @if (isLoading)
                 {
                     <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
@@ -18,7 +21,25 @@
                 }
                 else
                 {
-                    <span>Search</span>
+                    <span>Load All Repos</span>
+                }
+            </button>
+        </div>
+    </div>
+
+    <div class="search-container mb-4">
+        <div class="input-group">
+            <input type="text" class="form-control" @bind="searchText" @bind:event="oninput" 
+                   placeholder="Enter search text" @onkeyup="@(async (e) => { if (e.Key == "Enter") await SearchSimilarRepos(); })"/>
+            <button class="btn btn-primary" @onclick="SearchSimilarRepos" disabled="@isLoading">
+                @if (isLoading)
+                {
+                    <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                    <span> Searching...</span>
+                }
+                else
+                {
+                    <span>Search Similar</span>
                 }
             </button>
         </div>
@@ -33,59 +54,59 @@
 
     @if (repos?.Items != null && repos.Items.Any())
     {
-        <div class="row g-4">
+        <div class="repo-list">
             @foreach (var repo in repos.Items)
             {
-                <div class="col-md-6">
-                    <div class="card h-100 repo-card">
-                        <div class="card-body">
-                            <h5 class="card-title">
-                                <a href="@repo.HtmlUrl" target="_blank" class="text-decoration-none">
-                                    <i class="bi bi-github me-2"></i>@repo.Name
-                                </a>
-                            </h5>
+                <div class="card mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title">
+                            <a href="@repo.HtmlUrl" target="_blank">@repo.Name</a>
+                        </h5>
+                        <p class="card-text">@repo.Description</p>
+                        <div class="card-text">
                             @if (!string.IsNullOrEmpty(repo.Language))
                             {
-                                <span class="badge bg-secondary mb-2">@repo.Language</span>
-                            }
-                            <p class="card-text">@(string.IsNullOrEmpty(repo.Description) ? "No description available" : repo.Description)</p>
-                            <div class="d-flex justify-content-between align-items-center">
-                                <small class="text-muted">
-                                    <i class="bi bi-star-fill text-warning"></i> @repo.StargazersCount
+                                <small class="text-muted me-3">
+                                    <i class="bi bi-code-square"></i> @repo.Language
                                 </small>
-                                <small class="text-muted">@repo.StarredAt.ToString("yyyy-MM-dd")</small>
-                            </div>
+                            }
+                            <small class="text-muted">
+                                <i class="bi bi-star"></i> @repo.StargazersCount
+                            </small>
                         </div>
                     </div>
                 </div>
             }
         </div>
 
-        <div class="d-flex justify-content-center mt-4">
-            <nav aria-label="Repository navigation">
-                <ul class="pagination">
-                    <li class="page-item @(!repos.HasPreviousPage ? "disabled" : "")">
-                        <button class="page-link" @onclick="PreviousPage" disabled="@(!repos.HasPreviousPage)">Previous</button>
-                    </li>
-                    <li class="page-item active">
-                        <span class="page-link">Page @currentPage of @repos.TotalPages</span>
-                    </li>
-                    <li class="page-item @(!repos.HasNextPage ? "disabled" : "")">
-                        <button class="page-link" @onclick="NextPage" disabled="@(!repos.HasNextPage)">Next</button>
-                    </li>
-                </ul>
-            </nav>
-        </div>
+        @if (repos.HasNextPage)
+        {
+            <div class="text-center mt-4 mb-4">
+                <button class="btn btn-outline-primary" @onclick="LoadMoreRepos" disabled="@isLoadingMore">
+                    @if (isLoadingMore)
+                    {
+                        <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                        <span> Loading...</span>
+                    }
+                    else
+                    {
+                        <span>Load More</span>
+                    }
+                </button>
+            </div>
+        }
     }
 </div>
 
 @code {
     private string username = string.Empty;
+    private string searchText = string.Empty;
     private PaginatedList<GitHubRepo>? repos;
     private bool isLoading;
+    private bool isLoadingMore;
     private string? errorMessage;
     private int currentPage = 1;
-    private const int PageSize = 10;
+    private List<GitHubRepo> allRepos = new();
 
     private async Task SearchRepos()
     {
@@ -100,11 +121,17 @@
             errorMessage = null;
             isLoading = true;
             currentPage = 1;
-            repos = await GitHubService.GetStarredReposAsync(username, currentPage, PageSize);
+            allRepos.Clear();
+            
+            repos = await GitHubService.GetStarredReposAsync(username, currentPage);
             
             if (!repos.Items.Any())
             {
                 errorMessage = "No starred repositories found for this user";
+            }
+            else
+            {
+                allRepos.AddRange(repos.Items);
             }
         }
         catch (Exception ex)
@@ -118,35 +145,99 @@
         }
     }
 
-    private async Task PreviousPage()
-    {
-        if (repos?.HasPreviousPage == true)
-        {
-            currentPage--;
-            await LoadPage();
-        }
-    }
-
-    private async Task NextPage()
-    {
-        if (repos?.HasNextPage == true)
-        {
-            currentPage++;
-            await LoadPage();
-        }
-    }
-
-    private async Task LoadPage()
+    private async Task LoadMoreRepos()
     {
         try
         {
-            isLoading = true;
+            isLoadingMore = true;
+            currentPage++;
+            
+            var nextPage = await GitHubService.GetStarredReposAsync(username, currentPage);
+            allRepos.AddRange(nextPage.Items);
+            
+            // Update the repos with the combined results while preserving the HasNextPage from the latest request
+            repos = new PaginatedList<GitHubRepo>(allRepos, currentPage, nextPage.PageSize, nextPage.HasNextPage);
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error loading more repositories: {ex.Message}";
+        }
+        finally
+        {
+            isLoadingMore = false;
+        }
+    }
+
+    private async Task LoadAllRepos()
+    {
+        if (string.IsNullOrWhiteSpace(username))
+        {
+            errorMessage = "Please enter a GitHub username";
+            return;
+        }
+
+        try
+        {
             errorMessage = null;
-            repos = await GitHubService.GetStarredReposAsync(username, currentPage, PageSize);
+            isLoading = true;
+            allRepos.Clear();
+            
+            var allStarredRepos = await GitHubService.GetAllStarredReposAsync(username);
+            foreach (var repo in allStarredRepos)
+            {
+                // Check if the repo ID exists in IndexedDB
+                var existingRepoVector = await IndexedDBService.GetRepositoryVectorByIdAsync(repo.Id);
+                if (existingRepoVector != null)
+                {
+                    Console.WriteLine($"Repo with ID {repo.Id} already exists.");
+                    continue;
+                }
+
+                var content = repo.FullName + " " + repo.Description + "" + repo.Language;
+
+                if (string.IsNullOrWhiteSpace(content))
+                {
+                    continue;
+                }
+
+                var vector = await EmbeddingService.GetEmbeddingAsync(content);
+                var repoVector = new RepositoryVector { Repository = repo, Vector = vector };
+                await IndexedDBService.StoreRepositoryVectorAsync(repoVector);
+            }
+            
+            repos = new PaginatedList<GitHubRepo>(allStarredRepos, 1, allStarredRepos.Count, false);
         }
         catch (Exception ex)
         {
             errorMessage = $"Error: {ex.Message}";
+            repos = null;
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task SearchSimilarRepos()
+    {
+        if (string.IsNullOrWhiteSpace(searchText))
+        {
+            errorMessage = "Please enter search text";
+            return;
+        }
+
+        try
+        {
+            errorMessage = null;
+            isLoading = true;
+            
+            var similarRepos = await VectorSimilarityService.FindSimilarRepositoriesAsync(searchText);
+            repos = new PaginatedList<GitHubRepo>(similarRepos.Select(x => x.Repo).ToList(), 1, similarRepos.Count, false);
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error: {ex.Message}";
+            repos = null;
         }
         finally
         {

@@ -1,57 +1,75 @@
-using System.Net.Http.Json;
 using GithubStarAITool.Models;
+using System.Net.Http.Json;
 
 namespace GithubStarAITool.Services;
 
 public class GitHubService : IGitHubService
 {
     private readonly HttpClient _httpClient;
+    private readonly string _token;
 
-    public GitHubService(HttpClient httpClient)
+    public GitHubService(IConfiguration configuration)
     {
-        _httpClient = httpClient;
+        _httpClient = new HttpClient();
+        _token = configuration["GitHubService:Token"];
         _httpClient.BaseAddress = new Uri("https://api.github.com/");
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "GithubStarAITool");
         _httpClient.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+        _httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _token);
     }
 
-    public async Task<PaginatedList<GitHubRepo>> GetStarredReposAsync(string username, int page = 1, int pageSize = 10)
+    public async Task<PaginatedList<GitHubRepo>> GetStarredReposAsync(string username, int page = 1, int pageSize = 50)
     {
         try
         {
-            var repos = await _httpClient.GetFromJsonAsync<List<GitHubRepo>>($"users/{username}/starred?page={page}&per_page={pageSize}");
-            
-            // Get total count from GitHub API response headers
-            //var linkHeader = _httpClient.DefaultRequestHeaders.GetValues("Link").FirstOrDefault();
-            //var totalCount = GetTotalCountFromHeader(linkHeader);
+            // Request one extra item to determine if there's a next page
+            var response = await _httpClient.GetAsync($"users/{username}/starred?page={page}&per_page={pageSize}");
+            response.EnsureSuccessStatusCode();
 
-            return new PaginatedList<GitHubRepo>(repos ?? new List<GitHubRepo>(), 100, page, pageSize);
+            var repos = await response.Content.ReadFromJsonAsync<List<GitHubRepo>>();
+
+            if (repos == null)
+                return new PaginatedList<GitHubRepo>(new List<GitHubRepo>(), page, pageSize, false);
+
+            // Remove the extra item before returning if we got more than requested
+            var itemsToReturn = repos;
+            var hasNextPage = repos.Count == pageSize;
+
+            // Handle rate limit
+            if (response.Headers.TryGetValues("X-RateLimit-Remaining", out var values) && int.TryParse(values.FirstOrDefault(), out var remaining) && remaining == 0)
+            {
+                if (response.Headers.TryGetValues("X-RateLimit-Reset", out var resetValues) && long.TryParse(resetValues.FirstOrDefault(), out var reset))
+                {
+                    var delay = TimeSpan.FromSeconds(reset - DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+                    await Task.Delay(delay);
+                }
+            }
+
+            return new PaginatedList<GitHubRepo>(itemsToReturn, page, pageSize, hasNextPage);
         }
-        catch (HttpRequestException)
+        catch (HttpRequestException ex)
         {
-            return new PaginatedList<GitHubRepo>(new List<GitHubRepo>(), 0, page, pageSize);
+            return new PaginatedList<GitHubRepo>(new List<GitHubRepo>(), page, pageSize, false);
         }
     }
 
-    private int GetTotalCountFromHeader(string? linkHeader)
+    public async Task<List<GitHubRepo>> GetAllStarredReposAsync(string username)
     {
-        if (string.IsNullOrEmpty(linkHeader)) return 0;
+        var allRepos = new List<GitHubRepo>();
+        var page = 1;
+        const int pageSize = 100;
         
-        var lastLink = linkHeader.Split(',')
-            .FirstOrDefault(l => l.Contains("rel=\"last\""));
-            
-        if (lastLink == null) return 0;
-
-        var pageQuery = lastLink.Split('?')[1].Split('&')
-            .FirstOrDefault(q => q.StartsWith("page="));
-            
-        if (pageQuery == null) return 0;
-
-        if (int.TryParse(pageQuery.Replace("page=", ""), out int lastPage))
+        while (true)
         {
-            return lastPage * 10;
+            var result = await GetStarredReposAsync(username, page, pageSize);
+            allRepos.AddRange(result.Items);
+            
+            if (!result.HasNextPage)
+                break;
+                
+            page++;
         }
-
-        return 0;
+        
+        return allRepos;
     }
 }
